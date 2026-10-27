@@ -7,7 +7,8 @@ name: Verzamelen
 # na een nieuwe commit op dit bestand.
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # Bewust niet op :00/:15/:30/:45: daar is GitHub het drukst en vallen geplande runs vaker weg.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -45,6 +46,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$(date -u +%H)" = "00" ] && [ "$(date -u +%M)" -lt 15 ]; then
+          if [ "$(date -u +%H)" = "00" ] && [ "$(date -u +%M)" -lt 22 ]; then
             gh api -X PUT "repos/${{ github.repository }}/actions/workflows/verzamel.yml/enable" && echo "Schema actief gehouden."
           fi
