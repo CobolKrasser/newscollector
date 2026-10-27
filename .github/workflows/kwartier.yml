@@ -15,8 +15,9 @@ permissions:
   contents: read
   actions: write # alleen om het schema actief te houden (zie laatste stap)
 
+# Eigen groepsnaam: de vastgelopen run van 27-10 (zonder taken, niet te annuleren) zit in groep "verzamelen".
 concurrency:
-  group: verzamelen
+  group: nieuws-kwartier
   cancel-in-progress: false
 
 jobs:
