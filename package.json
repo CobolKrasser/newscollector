@@ -1,0 +1,13 @@
+{
+  "name": "flissebaalje-nieuws",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nieuwsverzamelaar voor een persoonlijke nieuwspagina (draait in GitHub Actions)",
+  "type": "module",
+  "scripts": {
+    "verzamel": "node verzamel.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.1.0"
+  }
+}

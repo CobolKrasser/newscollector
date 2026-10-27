@@ -1,0 +1,48 @@
+name: Verzamelen
+
+# Elk kwartier nieuws verzamelen voor flissebaalje.nl/nieuws/.
+# Openbare repo: onbeperkt gratis Actions-minuten. Instellingen en data staan afgeschermd op de server;
+# het logboek hier bevat alleen aantallen.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # alleen om het schema actief te houden (zie laatste stap)
+
+concurrency:
+  group: verzamelen
+  cancel-in-progress: false
+
+jobs:
+  verzamel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verzamelen
+        run: node verzamel.mjs
+        env:
+          NIEUWS_API: https://flissebaalje.nl/nieuws/api.php
+          NIEUWS_TOKEN: ${{ secrets.NIEUWS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # GitHub schakelt geplande workflows in openbare repos uit na 60 dagen zonder commits.
+      # Eén keer per dag (eerste run na middernacht UTC) het schema opnieuw aanzetten.
+      - name: Schema actief houden
+        if: always() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%H)" = "00" ] && [ "$(date -u +%M)" -lt 15 ]; then
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/verzamel.yml/enable" && echo "Schema actief gehouden."
+          fi
