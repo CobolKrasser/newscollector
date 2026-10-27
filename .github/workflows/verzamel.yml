@@ -3,6 +3,8 @@ name: Verzamelen
 # Elk kwartier nieuws verzamelen voor flissebaalje.nl/nieuws/.
 # Openbare repo: onbeperkt gratis Actions-minuten. Instellingen en data staan afgeschermd op de server;
 # het logboek hier bevat alleen aantallen.
+# Let op: na uit- en aanzetten van deze workflow registreert GitHub het schema soms pas opnieuw
+# na een nieuwe commit op dit bestand.
 on:
   schedule:
     - cron: "*/15 * * * *"
