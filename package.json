@@ -1,5 +1,5 @@
 {
-  "name": "flissebaalje-nieuws",
+  "name": "newscollector",
   "version": "1.0.0",
   "private": true,
   "description": "Nieuwsverzamelaar voor een persoonlijke nieuwspagina (draait in GitHub Actions)",

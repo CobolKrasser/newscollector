@@ -1,4 +1,4 @@
-# flissebaalje-nieuws
+# newscollector
 
 Nieuwsverzamelaar voor een persoonlijke, afgeschermde nieuwspagina op flissebaalje.nl.
 
