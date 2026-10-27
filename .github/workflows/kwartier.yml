@@ -3,8 +3,8 @@ name: Verzamelen
 # Elk kwartier nieuws verzamelen voor flissebaalje.nl/nieuws/.
 # Openbare repo: onbeperkt gratis Actions-minuten. Instellingen en data staan afgeschermd op de server;
 # het logboek hier bevat alleen aantallen.
-# Let op: na uit- en aanzetten van deze workflow registreert GitHub het schema soms pas opnieuw
-# na een nieuwe commit op dit bestand.
+# Let op: na uit- en aanzetten van een workflow pakt GitHub het schema soms niet meer op; daarom
+# heet dit bestand kwartier.yml (verzamel.yml bleef hangen na uit/aan, 27-10-2026).
 on:
   schedule:
     # Bewust niet op :00/:15/:30/:45: daar is GitHub het drukst en vallen geplande runs vaker weg.
@@ -47,5 +47,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$(date -u +%H)" = "00" ] && [ "$(date -u +%M)" -lt 22 ]; then
-            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/verzamel.yml/enable" && echo "Schema actief gehouden."
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/kwartier.yml/enable" && echo "Schema actief gehouden."
           fi

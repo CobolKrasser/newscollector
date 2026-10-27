@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Verzamelt nieuws voor flissebaalje.nl/nieuws/ (draait elk kwartier via GitHub Actions, zie
-// .github/workflows/verzamel.yml).
+// .github/workflows/kwartier.yml).
 //
 // Deze repo is openbaar; de persoonlijke instellingen (rubrieken, bronnen, betaalmuursites) staan
 // niet hier maar komen samen met de dataset van de (afgeschermde) API. Daarom logt dit script in
