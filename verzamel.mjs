@@ -153,6 +153,14 @@ async function leesBron(bron, nu, staat) {
   return { overgeslagen: items === null, items: items || [] };
 }
 
+/** HLS-stream (m3u8) van een Dumpert-filmpje: 720p, anders de adaptieve stream. */
+function dumpertVideo(it) {
+  const varianten = (it.media || []).flatMap((m) => (m.mediatype === "VIDEO" ? m.variants || [] : []));
+  const kies = (v) => varianten.find((x) => x.version === v)?.uri;
+  const uri = kies("720p") || kies("stream") || kies("tablet");
+  return typeof uri === "string" && /^https:\/\/media\.dumpert\.nl\/.+\.m3u8$/.test(uri) ? uri : undefined;
+}
+
 async function leesBronNu(bron, nu, st) {
   if (bron.soort === "dumpert") {
     // Dumpert blokkeert GitHub-servers; daarom eerst via de eigen API op Strato, anders direct.
@@ -178,6 +186,7 @@ async function leesBronNu(bron, nu, st) {
       t: tijd(it.date, nu),
       beschrijving: kaal(it.description),
       beeld: [it.stills?.["still-large"], it.stills?.still, it.still, it.thumbnail].find((u) => typeof u === "string" && u.startsWith("https://media.dumpert.nl/")),
+      video: dumpertVideo(it),
     }));
   }
   const voorwaarden = {};
@@ -449,7 +458,7 @@ async function main() {
   const dumpert = nieuw.filter((it) => it.bron.soort === "dumpert");
   for (const it of dumpert) {
     gezien[it.link] = nu;
-    items.push({ id: idVan(it.link), t: new Date(it.t).toISOString(), cat: "dumpert", kop: it.titel, sam: it.beschrijving.slice(0, 220), links: [{ bron: "Dumpert", url: it.link }], score: 50, plek: it.plek, ...(it.beeld ? { beeld: it.beeld } : {}) });
+    items.push({ ...(it.video ? { video: it.video } : {}), id: idVan(it.link), t: new Date(it.t).toISOString(), cat: "dumpert", kop: it.titel, sam: it.beschrijving.slice(0, 220), links: [{ bron: "Dumpert", url: it.link }], score: 50, plek: it.plek, ...(it.beeld ? { beeld: it.beeld } : {}) });
   }
 
   // 3. Artikelen ophalen: betaalmuur, hoofdfoto en tekst
@@ -545,8 +554,13 @@ async function main() {
   meld(`Claude: ${geplaatst} geplaatst, ${proef} proefberichten, ${samengevoegd} samengevoegd met een bestaand bericht, ${mislukt} mislukt.`);
 
   // 6. Dumpert: alleen de actuele top 10 met de nieuwste plek
-  const dumpertNu = new Map(resultaten[BRONNEN.findIndex((b) => b.soort === "dumpert")].value?.items.map((it) => [idVan(it.link), it.plek]) || []);
-  for (const it of items) if (it.cat === "dumpert" && dumpertNu.has(it.id)) it.plek = dumpertNu.get(it.id);
+  const dumpertNu = new Map(resultaten[BRONNEN.findIndex((b) => b.soort === "dumpert")].value?.items.map((it) => [idVan(it.link), it]) || []);
+  for (const it of items) {
+    const nu = it.cat === "dumpert" && dumpertNu.get(it.id);
+    if (!nu) continue;
+    it.plek = nu.plek;
+    if (nu.video) it.video = nu.video;
+  }
 
   // 7. Opruimen en bewaren
   const uniek = new Map();
