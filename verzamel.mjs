@@ -24,6 +24,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 // Komen uit de instellingen van de server (of --bronnen bij lokaal testen).
+// Per gebruiker gezet vóór de beoordeling (rubrieken, bronnen, profiel); BETAALMUUR geldt voor iedereen.
 let RUBRIEKEN = {}, BRONNEN = [], BETAALMUUR = [], PROFIEL = "";
 
 const MODEL = "claude-haiku-5-5";
@@ -51,13 +52,13 @@ async function beperkt(lijst, n, fn) {
   return uit;
 }
 
-const meldingen = []; // gaan mee naar de server (run.meldingen), niet naar het openbare logboek
+let meldingen = []; // gaan mee naar de server (run.meldingen), niet naar het openbare logboek
 const warn = (msg) => {
   meldingen.push(msg);
   if (!inCI) console.warn(`WAARSCHUWING: ${msg}`);
 };
 const log = (msg) => { if (!inCI) console.log(msg); };
-const verslag = []; // samenvatting van deze run, zichtbaar onderaan de nieuwspagina
+let verslag = []; // samenvatting van deze run, zichtbaar onderaan de nieuwspagina
 const meld = (msg) => { verslag.push(msg); log(msg); };
 
 // ---------- Ophalen ----------
@@ -140,17 +141,40 @@ function tijd(datum, nu) {
 }
 
 const INTERVAL = { rss: 15, bing: 60, dumpert: 30 }; // minuten, per bron te overschrijven met "elke"
+const DUMPERT_URL = "https://api-live.dumpert.nl/mobile_api/json/top5/dag/";
+
+/** Adres om op te halen: RSS-url, Bing-zoekopdracht (nieuwste eerst) of de Dumpert-dagtop. */
+function bronUrl(b) {
+  if (b.soort === "dumpert") return DUMPERT_URL;
+  if (b.soort === "bing") return `https://www.bing.com/news/search?q=${encodeURIComponent(b.zoek || "")}&format=rss&mkt=${b.markt || "nl-NL"}&qft=sortbydate%3d%221%22`;
+  return b.url;
+}
 
 /**
- * Leest een bron, maar niet vaker dan het interval van die bron, en met If-None-Match/If-Modified-Since
- * zodat ongewijzigde feeds alleen een 304 kosten. staat[bron.id] = { t, etag, lm }.
+ * Haalt een feed op met If-None-Match/If-Modified-Since (cond[url] = { etag, lm }), zodat ongewijzigde
+ * feeds alleen een 304 kosten. null = ongewijzigd. Met voorwaardelijk=false altijd de volledige feed
+ * (voor een gebruiker die deze bron net heeft toegevoegd).
  */
-async function leesBron(bron, nu, staat) {
-  const st = staat[bron.id] || {};
-  if (st.t && nu - st.t < ((bron.elke ?? INTERVAL[bron.soort]) - 3) * 60e3) return { overgeslagen: true, items: [] };
-  staat[bron.id] = { ...st, t: nu };
-  const items = await leesBronNu(bron, nu, staat[bron.id]);
-  return { overgeslagen: items === null, items: items || [] };
+async function haalFeed(bron, url, nu, cond, voorwaardelijk) {
+  const st = (cond[url] ||= {});
+  const kop = {};
+  if (voorwaardelijk && st.etag) kop["If-None-Match"] = st.etag;
+  if (voorwaardelijk && st.lm) kop["If-Modified-Since"] = st.lm;
+  if (bron.soort === "dumpert") return leesDumpert(bron, nu);
+  const { tekst, res } = await haal(url, { headers: kop });
+  if (tekst === null) return null;
+  st.etag = res.headers.get("etag") || undefined;
+  st.lm = res.headers.get("last-modified") || undefined;
+  return leesFeed(tekst)
+    .slice(0, 100)
+    .map((it) => ({
+      titel: it.titel,
+      link: schoneUrl(bron.soort === "bing" ? bingLink(it.link) : it.link),
+      t: tijd(it.datum, nu),
+      beschrijving: it.beschrijving.slice(0, 900),
+      beeld: veiligBeeld(it.beeld, it.link),
+    }))
+    .filter((it) => it.titel && /^https?:\/\//.test(it.link));
 }
 
 /** HLS-stream (m3u8) van een Dumpert-filmpje: 720p, anders de adaptieve stream. */
@@ -161,52 +185,32 @@ function dumpertVideo(it) {
   return typeof uri === "string" && /^https:\/\/media\.dumpert\.nl\/.+\.m3u8$/.test(uri) ? uri : undefined;
 }
 
-async function leesBronNu(bron, nu, st) {
-  if (bron.soort === "dumpert") {
-    // Dumpert blokkeert GitHub-servers; daarom eerst via de eigen API op Strato, anders direct.
-    let tekst;
-    if (process.env.NIEUWS_API) {
-      try {
-        const res = await fetch(`${process.env.NIEUWS_API}?a=dumpert`, {
-          headers: { "X-Nieuws-Token": process.env.NIEUWS_TOKEN, "User-Agent": UA },
-          signal: AbortSignal.timeout(30000),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        tekst = await res.text();
-      } catch (err) {
-        warn(`Dumpert via de eigen server mislukt (${err.message}); direct proberen.`);
-      }
+async function leesDumpert(bron, nu) {
+  // Dumpert blokkeert GitHub-servers; daarom eerst via de eigen API op Strato, anders direct.
+  let tekst;
+  if (process.env.NIEUWS_API) {
+    try {
+      const res = await fetch(`${process.env.NIEUWS_API}?a=dumpert`, {
+        headers: { "X-Nieuws-Token": process.env.NIEUWS_TOKEN, "User-Agent": UA },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      tekst = await res.text();
+    } catch (err) {
+      warn(`Dumpert via de eigen server mislukt (${err.message}); direct proberen.`);
     }
-    tekst ??= (await haal(bron.url, { accept: "application/json" })).tekst;
-    const data = JSON.parse(tekst);
-    return (data.items || []).slice(0, 10).map((it, i) => ({
-      bron, plek: i + 1,
-      titel: kaal(it.title),
-      link: `https://www.dumpert.nl/item/${encodeURIComponent(it.id)}`,
-      t: tijd(it.date, nu),
-      beschrijving: kaal(it.description),
-      beeld: [it.stills?.["still-large"], it.stills?.still, it.still, it.thumbnail].find((u) => typeof u === "string" && u.startsWith("https://media.dumpert.nl/")),
-      video: dumpertVideo(it),
-    }));
   }
-  const voorwaarden = {};
-  if (st.etag) voorwaarden["If-None-Match"] = st.etag;
-  if (st.lm) voorwaarden["If-Modified-Since"] = st.lm;
-  const { tekst, res } = await haal(bron.url, { headers: voorwaarden });
-  if (tekst === null) return null; // 304: niets nieuws
-  st.etag = res.headers.get("etag") || undefined;
-  st.lm = res.headers.get("last-modified") || undefined;
-  return leesFeed(tekst)
-    .slice(0, bron.max || 60)
-    .map((it) => ({
-      bron,
-      titel: it.titel,
-      link: schoneUrl(bron.soort === "bing" ? bingLink(it.link) : it.link),
-      t: tijd(it.datum, nu),
-      beschrijving: it.beschrijving.slice(0, 900),
-      beeld: veiligBeeld(it.beeld, it.link),
-    }))
-    .filter((it) => it.titel && /^https?:\/\//.test(it.link));
+  tekst ??= (await haal(DUMPERT_URL, { accept: "application/json" })).tekst;
+  const data = JSON.parse(tekst);
+  return (data.items || []).slice(0, 10).map((it, i) => ({
+    plek: i + 1,
+    titel: kaal(it.title),
+    link: `https://www.dumpert.nl/item/${encodeURIComponent(it.id)}`,
+    t: tijd(it.date, nu),
+    beschrijving: kaal(it.description),
+    beeld: [it.stills?.["still-large"], it.stills?.still, it.still, it.thumbnail].find((u) => typeof u === "string" && u.startsWith("https://media.dumpert.nl/")),
+    video: dumpertVideo(it),
+  }));
 }
 
 /** Alleen absolute https-afbeeldingen (relatieve paden worden opgelost tegen de artikel-URL). */
@@ -388,7 +392,7 @@ async function laad(lokaal) {
   if (lokaal) {
     try { return JSON.parse(fs.readFileSync(lokaal, "utf8")); } catch { return {}; }
   }
-  const res = await fetch(`${process.env.NIEUWS_API}?a=export`, {
+  const res = await fetch(`${process.env.NIEUWS_API}?a=export&v=2`, {
     headers: { "X-Nieuws-Token": process.env.NIEUWS_TOKEN, "User-Agent": UA },
     signal: AbortSignal.timeout(30000),
   });
@@ -413,6 +417,10 @@ async function bewaar(lokaal, data) {
 const idVan = (url) => createHash("sha256").update(url).digest("base64url").slice(0, 12);
 
 // ---------- Hoofdprogramma ----------
+//
+// Per run: alle bronnen van alle gebruikers één keer ophalen (gedeeld), elk artikel één keer openen
+// (gedeeld), en dan per gebruiker de berichten laten beoordelen met diens rubrieken, profiel en duimpjes.
+
 async function main() {
   const lokaalIdx = process.argv.indexOf("--lokaal");
   const lokaal = lokaalIdx > 0 ? process.argv[lokaalIdx + 1] : null;
@@ -422,60 +430,151 @@ async function main() {
 
   const nu = Date.now();
   const data = await laad(lokaal);
+  if (data.versie !== 2 && !lokaal) throw new Error("De API geeft een oud exportformaat; eerst de site deployen.");
+  const gebruikers = data.gebruikers || {};
+  BETAALMUUR = data.betaalmuur || [];
+
+  // Lokaal testen: beginstand uit --bronnen voor gebruiker "fred"
   const bronnenIdx = process.argv.indexOf("--bronnen");
-  const config = bronnenIdx > 0
-    ? await import(`${pathToFileURL(path.resolve(process.argv[bronnenIdx + 1])).href}?v=${nu}`)
-    : data.config;
-  if (!config?.BRONNEN?.length || !config.RUBRIEKEN) throw new Error("Geen instellingen ontvangen (config ontbreekt in de export, of geef --bronnen <bestand>).");
-  ({ RUBRIEKEN, BRONNEN, BETAALMUUR = [], PROFIEL = "" } = config);
-  const stemmen = Object.fromEntries(Object.entries(data.stemmen || {}).filter(([, s]) => nu - s.t < STEMMEN_MS));
-  const staat = Object.fromEntries(Object.entries(data.bronnen || {}).filter(([id]) => BRONNEN.some((b) => b.id === id)));
-  const gezien = Object.fromEntries(Object.entries(data.gezien || {}).filter(([, t]) => nu - t < BEWAAR_MS + NIEUW_MS));
-  let items = (data.items || []).filter((it) => nu - Date.parse(it.t) < BEWAAR_MS);
+  if (bronnenIdx > 0) {
+    const m = await import(`${pathToFileURL(path.resolve(process.argv[bronnenIdx + 1])).href}?v=${nu}`);
+    BETAALMUUR = m.BETAALMUUR || BETAALMUUR;
+    const fred = (gebruikers.fred ||= {});
+    fred.config ||= { profiel: m.PROFIEL, rubrieken: m.RUBRIEKEN, bronnen: m.BRONNEN };
+  }
+  const namen = Object.keys(gebruikers).filter((n) => gebruikers[n].config?.bronnen?.length && Object.keys(gebruikers[n].config.rubrieken || {}).length);
+  if (!namen.length) throw new Error("Geen gebruikers met rubrieken en bronnen.");
 
-  // 1. Bronnen lezen
-  const resultaten = (await beperkt(BRONNEN, 8, (b) => leesBron(b, nu, staat)));
-  const overgeslagen = resultaten.filter((r) => r.status === "fulfilled" && r.value.overgeslagen).length;
-  const kandidaten = [];
-  const perUrl = new Set();
-  resultaten.forEach((r, i) => {
-    if (r.status === "rejected") return warn(`Bron ${BRONNEN[i].id} niet gelezen: ${r.reason?.cause?.code || r.reason?.message || r.reason}`);
-    for (const it of r.value.items) {
-      if (gezien[it.link] || perUrl.has(it.link)) continue;
-      if (nu - it.t > NIEUW_MS) continue;
-      if (achterBetaalmuur(it.link)) { gezien[it.link] = nu; continue; }
-      perUrl.add(it.link);
-      kandidaten.push(it);
+  // 1. Welke adressen moeten nu opgehaald worden, en voor wie?
+  //    staat per gebruiker: { url: laatst opgehaald } ; cond (gedeeld): { url: { etag, lm } }
+  const cond = data.gedeeld?.cond || {};
+  const taken = new Map(); // url -> { bron, voor: [naam], nieuw: bool }
+  for (const naam of namen) {
+    const g = gebruikers[naam];
+    g.staat = Object.fromEntries(Object.entries(g.bronnen || {}).filter(([, t]) => typeof t === "number"));
+    for (const b of g.config.bronnen) {
+      const url = bronUrl(b);
+      if (!url) continue;
+      const vorige = g.staat[url];
+      if (vorige && nu - vorige < ((b.elke ?? INTERVAL[b.soort] ?? 15) - 3) * 60e3) continue;
+      const taak = taken.get(url) || { bron: b, voor: [], nieuw: false };
+      if (!taak.voor.includes(naam)) taak.voor.push(naam);
+      if (!vorige) taak.nieuw = true;
+      taken.set(url, taak);
     }
+  }
+  const lijst = [...taken.entries()];
+  const opgehaald = new Map(); // url -> items[] (null = ongewijzigd)
+  const resultaten = await beperkt(lijst, 8, ([url, taak]) => haalFeed(taak.bron, url, nu, cond, !taak.nieuw));
+  let mislukt = 0, ongewijzigd = 0;
+  resultaten.forEach((r, i) => {
+    const [url, taak] = lijst[i];
+    if (r.status === "rejected") {
+      mislukt++;
+      for (const naam of taak.voor) (gebruikers[naam].fouten ||= []).push(`Bron ${taak.bron.naam || url} niet gelezen: ${r.reason?.cause?.code || r.reason?.message || r.reason}`);
+      return;
+    }
+    if (r.value === null) ongewijzigd++;
+    opgehaald.set(url, r.value || []);
+    for (const naam of taak.voor) gebruikers[naam].staat[url] = nu;
   });
-  kandidaten.sort((a, b) => b.t - a.t);
-  const nieuw = kandidaten.slice(0, MAX_NIEUW_PER_RUN);
-  // Wat deze run niet past, moet de volgende run nog zien: voor die bronnen geen 304 vragen.
-  for (const it of kandidaten.slice(MAX_NIEUW_PER_RUN)) if (staat[it.bron.id]) { delete staat[it.bron.id].etag; delete staat[it.bron.id].lm; }
-  meld(`Bronnen: ${resultaten.filter((r) => r.status === "fulfilled").length - overgeslagen}/${BRONNEN.length} opgehaald, ${overgeslagen} overgeslagen (interval of ongewijzigd), ${resultaten.filter((r) => r.status === "rejected").length} mislukt; ${nieuw.length} nieuwe berichten.`);
+  console.log(`Bronnen: ${lijst.length} adressen opgehaald (${ongewijzigd} ongewijzigd, ${mislukt} mislukt) voor ${namen.length} gebruiker(s).`);
 
-  // 2. Dumpert: geen beoordeling nodig, wel plek in de top 10 bijwerken
-  const dumpert = nieuw.filter((it) => it.bron.soort === "dumpert");
-  for (const it of dumpert) {
-    gezien[it.link] = nu;
-    items.push({ ...(it.video ? { video: it.video } : {}), id: idVan(it.link), t: new Date(it.t).toISOString(), cat: "dumpert", kop: it.titel, sam: it.beschrijving.slice(0, 220), links: [{ bron: "Dumpert", url: it.link }], score: 50, plek: it.plek, ...(it.beeld ? { beeld: it.beeld } : {}) });
+  // 2. Artikelen worden gedeeld opgehaald (cache per link) tijdens de verwerking per gebruiker.
+  const artikelCache = new Map(); // link -> Promise<{ vrij, tekst, beeld, beschrijving, link }>
+  function artikel(it, streng) {
+    if (!artikelCache.has(it.link)) {
+      const kopie = { ...it };
+      artikelCache.set(it.link, verrijk(kopie, streng).then((vrij) => ({ vrij, tekst: kopie.tekst, beeld: kopie.beeld, beschrijving: kopie.beschrijving, link: kopie.link })));
+    }
+    return artikelCache.get(it.link);
   }
 
-  // 3. Artikelen ophalen: betaalmuur, hoofdfoto en tekst
+  const client = droog ? null : new Anthropic();
+  const uitvoer = {};
+  let totaalNieuw = 0, totaalGeplaatst = 0, afgebroken = false;
+  for (const naam of namen) {
+    if (afgebroken) break;
+    const r = await verwerkGebruiker(naam, gebruikers[naam], { nu, opgehaald, artikel, client, droog, lokaal });
+    uitvoer[naam] = r.uit;
+    totaalNieuw += r.nieuw;
+    totaalGeplaatst += r.geplaatst;
+    afgebroken = r.afgebroken;
+  }
+
+  await bewaar(lokaal, {
+    versie: 2,
+    bijgewerkt: new Date(nu).toISOString(),
+    gedeeld: { cond },
+    gebruikers: uitvoer,
+    ...(lokaal ? { betaalmuur: BETAALMUUR } : {}),
+  });
+  console.log(`Klaar: ${totaalNieuw} nieuwe berichten bekeken, ${totaalGeplaatst} geplaatst.`);
+  if (afgebroken) throw new Error("Claude API weigert de sleutel.");
+}
+
+async function verwerkGebruiker(naam, g, { nu, opgehaald, artikel, client, droog, lokaal }) {
+  meldingen = [...(g.fouten || [])];
+  verslag = [];
+  RUBRIEKEN = g.config.rubrieken;
+  BRONNEN = g.config.bronnen;
+  PROFIEL = g.config.profiel || "";
+  const stemmen = Object.fromEntries(Object.entries(g.stemmen || {}).filter(([, s]) => nu - s.t < STEMMEN_MS));
+  const gezien = Object.fromEntries(Object.entries(g.gezien || {}).filter(([, t]) => nu - t < BEWAAR_MS + NIEUW_MS));
+  let items = (g.items || []).filter((it) => nu - Date.parse(it.t) < BEWAAR_MS);
+
+  // Kandidaten uit de opgehaalde bronnen van deze gebruiker
+  const kandidaten = [];
+  const perUrl = new Set();
+  let dumpertNu = null;
+  for (const b of BRONNEN) {
+    const lijst = opgehaald.get(bronUrl(b));
+    if (!lijst) continue;
+    if (b.soort === "dumpert") dumpertNu = lijst;
+    for (const ruw of lijst.slice(0, b.max || 60)) {
+      if (gezien[ruw.link] || perUrl.has(ruw.link)) continue;
+      if (nu - ruw.t > NIEUW_MS) continue;
+      if (achterBetaalmuur(ruw.link)) { gezien[ruw.link] = nu; continue; }
+      perUrl.add(ruw.link);
+      kandidaten.push({ ...ruw, bron: b, feedLink: ruw.link });
+    }
+  }
+  kandidaten.sort((a, b) => b.t - a.t);
+  const nieuw = kandidaten.slice(0, MAX_NIEUW_PER_RUN);
+  // Zowel het adres uit de feed als het adres na doorverwijzen onthouden, anders komt het bericht terug.
+  const markeer = (it) => { gezien[it.link] = nu; gezien[it.feedLink] = nu; };
+  // Wat deze run niet past, moet de volgende run nog zien: die bronnen niet als opgehaald markeren.
+  for (const it of kandidaten.slice(MAX_NIEUW_PER_RUN)) delete g.staat[bronUrl(it.bron)];
+  meld(`Bronnen: ${BRONNEN.filter((b) => opgehaald.has(bronUrl(b))).length}/${BRONNEN.length} opgehaald; ${nieuw.length} nieuwe berichten.`);
+
+  // Dumpert: geen beoordeling nodig
+  const dumpertRubriek = Object.keys(RUBRIEKEN).find((c) => BRONNEN.some((b) => b.soort === "dumpert" && b.rubrieken.includes(c)));
+  for (const it of nieuw.filter((x) => x.bron.soort === "dumpert")) {
+    markeer(it);
+    items.push({ ...(it.video ? { video: it.video } : {}), id: idVan(it.link), t: new Date(it.t).toISOString(), cat: it.bron.rubrieken[0] || dumpertRubriek, kop: it.titel, sam: it.beschrijving.slice(0, 220), links: [{ bron: "Dumpert", url: it.link }], score: 50, plek: it.plek, ...(it.beeld ? { beeld: it.beeld } : {}) });
+  }
+
+  // Artikelen: betaalmuur, hoofdfoto en tekst (gedeelde cache)
   let teBeoordelen = nieuw.filter((it) => it.bron.soort !== "dumpert");
-  const vrij = (await beperkt(teBeoordelen, 10, (it) => verrijk(it, it.bron.soort === "bing"))).map((r) => r.value !== false);
-  const geblokkeerd = new Set(teBeoordelen.filter((_, i) => !vrij[i]));
+  const verrijkt = await beperkt(teBeoordelen, 10, (it) => artikel(it, it.bron.soort === "bing"));
+  const geblokkeerd = new Set();
+  teBeoordelen.forEach((it, i) => {
+    const a = verrijkt[i].value;
+    if (!a) return;
+    if (!a.vrij) { geblokkeerd.add(it); return; }
+    Object.assign(it, { tekst: a.tekst, beeld: a.beeld || it.beeld, beschrijving: a.beschrijving || it.beschrijving, link: a.link || it.link });
+  });
   if (lokaal) for (const it of geblokkeerd) log(`  betaalmuur: ${it.link}`);
-  for (const it of geblokkeerd) gezien[it.link] = nu;
+  for (const it of geblokkeerd) markeer(it);
   teBeoordelen = teBeoordelen.filter((it) => !geblokkeerd.has(it));
   meld(`Artikelen: ${teBeoordelen.filter((it) => it.tekst).length} met tekst, ${teBeoordelen.filter((it) => it.beeld).length} met foto, ${geblokkeerd.size} achter een betaalmuur overgeslagen.`);
 
-  // 4. Mogelijke dubbelen zoeken (woordoverlap met berichten van de laatste 48 uur)
+  // Mogelijke dubbelen (woordoverlap met berichten van de laatste 48 uur, zelfde kolom)
   const recent = items.filter((it) => nu - Date.parse(it.t) < 48 * 3600e3).map((it) => ({ it, w: woorden(`${it.orig || ""} ${it.kop}`) }));
   for (const it of teBeoordelen) {
     const w = woorden(it.titel);
     it.dubbelen = recent
-      .filter((r) => r.it.cat !== "dumpert" && RUBRIEKEN[r.it.cat]?.kolom && it.bron.rubrieken.some((c) => RUBRIEKEN[c].kolom === RUBRIEKEN[r.it.cat].kolom))
+      .filter((r) => !r.it.plek && RUBRIEKEN[r.it.cat]?.kolom && it.bron.rubrieken.some((c) => RUBRIEKEN[c]?.kolom === RUBRIEKEN[r.it.cat].kolom))
       .map((r) => ({ r, s: gelijkenis(w, r.w) }))
       .filter((x) => x.s >= 0.34)
       .sort((a, b) => b.s - a.s)
@@ -483,8 +582,7 @@ async function main() {
       .map((x) => ({ id: x.r.it.id, kop: x.r.it.kop }));
   }
 
-  // 5. Claude
-  const client = droog ? null : new Anthropic();
+  // Claude
   const systeem = systeemPrompt(stemmen);
   const drempel = drempels(stemmen);
   const batches = [];
@@ -503,13 +601,15 @@ async function main() {
       if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) afgebroken = true;
       mislukt += batch.length;
       warn(`Beoordeling mislukt (${batch.length} berichten): ${err.message}`);
-      return; // niet als gezien markeren: volgende run opnieuw proberen
+      for (const it of batch) delete g.staat[bronUrl(it.bron)]; // volgende run opnieuw proberen
+      return;
     }
     for (const o of oordelen) {
       const it = batch[o.nr];
       if (!it) continue;
-      gezien[it.link] = nu;
-      const rubriek = it.bron.rubrieken.includes(o.rubriek) ? o.rubriek : (RUBRIEKEN[it.bron.rubrieken[0]].modus === "alles" ? it.bron.rubrieken[0] : null);
+      markeer(it);
+      const eerste = RUBRIEKEN[it.bron.rubrieken[0]];
+      const rubriek = it.bron.rubrieken.includes(o.rubriek) && RUBRIEKEN[o.rubriek] ? o.rubriek : (eerste?.modus === "alles" ? it.bron.rubrieken[0] : null);
       for (const c of it.bron.rubrieken) (perRubriek[c] ||= { kandidaat: 0, geplaatst: 0 }).kandidaat++;
       if (!rubriek || o.reclame) continue;
       const r = RUBRIEKEN[rubriek];
@@ -517,12 +617,12 @@ async function main() {
       const dubbel = o.dubbel_van && perId.get(o.dubbel_van);
       if (dubbel && RUBRIEKEN[dubbel.cat]?.kolom === r.kolom) {
         if (!dubbel.beeld && it.beeld) dubbel.beeld = it.beeld;
-        if (!dubbel.links.some((l) => l.url === it.link) && dubbel.links.length < 4) dubbel.links.push({ bron: it.bron.naam === "Bing Nieuws" ? domein(it.link) : it.bron.naam, url: it.link });
+        if (!dubbel.links.some((l) => l.url === it.link) && dubbel.links.length < 4) dubbel.links.push({ bron: it.bron.soort === "bing" ? domein(it.link) : it.bron.naam, url: it.link });
         samengevoegd++;
         continue;
       }
       let isProef = false;
-      if (r.modus === "filter" && score < drempel[rubriek]) {
+      if (r.modus === "filter" && score < (drempel[rubriek] ?? DREMPEL)) {
         if (score < 25 || Math.random() > PROEF_KANS) continue;
         isProef = true;
       }
@@ -534,7 +634,7 @@ async function main() {
         sam: String(o.samenvatting).trim().slice(0, 300),
         lang: String(o.uitgebreid || "").trim().slice(0, 900),
         orig: it.titel,
-        links: [{ bron: it.bron.naam === "Bing Nieuws" ? domein(it.link) : it.bron.naam, url: it.link }],
+        links: [{ bron: it.bron.soort === "bing" ? domein(it.link) : it.bron.naam, url: it.link }],
         score,
         ...(it.beeld ? { beeld: it.beeld } : {}),
         ...(isProef ? { proef: true } : {}),
@@ -553,23 +653,28 @@ async function main() {
   meld(`Per rubriek (kandidaten → geplaatst): ${Object.entries(perRubriek).map(([c, t]) => `${c} ${t.kandidaat}→${t.geplaatst}`).join(", ")}`);
   meld(`Claude: ${geplaatst} geplaatst, ${proef} proefberichten, ${samengevoegd} samengevoegd met een bestaand bericht, ${mislukt} mislukt.`);
 
-  // 6. Dumpert: alleen de actuele top 10 met de nieuwste plek
-  const dumpertNu = new Map(resultaten[BRONNEN.findIndex((b) => b.soort === "dumpert")].value?.items.map((it) => [idVan(it.link), it]) || []);
-  for (const it of items) {
-    const nu = it.cat === "dumpert" && dumpertNu.get(it.id);
-    if (!nu) continue;
-    it.plek = nu.plek;
-    if (nu.video) it.video = nu.video;
+  // Dumpert: plek in de actuele top 10 bijwerken
+  if (dumpertNu) {
+    const plekken = new Map(dumpertNu.map((it) => [idVan(it.link), it]));
+    for (const it of items) {
+      const nu2 = it.plek && plekken.get(it.id);
+      if (!nu2) continue;
+      it.plek = nu2.plek;
+      if (nu2.video) it.video = nu2.video;
+    }
   }
 
-  // 7. Opruimen en bewaren
+  // Opruimen
   const uniek = new Map();
-  for (const it of items) if (nu - Date.parse(it.t) < BEWAAR_MS) uniek.set(it.id, it);
+  for (const it of items) if (nu - Date.parse(it.t) < BEWAAR_MS && RUBRIEKEN[it.cat]) uniek.set(it.id, it);
   items = [...uniek.values()].sort((a, b) => Date.parse(b.t) - Date.parse(a.t));
   const run = { t: new Date(nu).toISOString(), duur: Math.round((Date.now() - nu) / 1000), verslag, meldingen: meldingen.slice(0, 40) };
-  await bewaar(lokaal, { versie: 1, bijgewerkt: new Date(nu).toISOString(), items, gezien, bronnen: staat, run, ...(lokaal ? { stemmen } : {}) });
-  console.log(`Klaar: ${nieuw.length} nieuwe berichten bekeken, ${geplaatst + proef} geplaatst, ${items.length} berichten in totaal, ${meldingen.length} meldingen.`);
-  if (afgebroken) throw new Error("Claude API weigert de sleutel.");
+  return {
+    uit: { items, gezien, bronnen: g.staat, run, ...(lokaal ? { config: g.config, stemmen } : {}) },
+    nieuw: nieuw.length,
+    geplaatst: geplaatst + proef,
+    afgebroken,
+  };
 }
 
 main().catch((err) => {
