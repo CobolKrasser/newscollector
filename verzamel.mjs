@@ -540,6 +540,10 @@ async function verwerkGebruiker(naam, g, { nu, opgehaald, artikel, client, droog
     }
   }
   kandidaten.sort((a, b) => b.t - a.t);
+  // Op de pagina telt het moment van vinden (t), niet de feeddatum (o): die is soms oud (Dumpert-top) of fout (Bangkok Post).
+  // Binnen één run houdt een milliseconde verschil de feedvolgorde aan.
+  const volgorde = new Map(kandidaten.map((k, i) => [k.feedLink, i]));
+  const plaatsing = (it) => ({ t: new Date(nu - (volgorde.get(it.feedLink) ?? 0)).toISOString(), o: new Date(it.t).toISOString() });
   const nieuw = kandidaten.slice(0, MAX_NIEUW_PER_RUN);
   // Zowel het adres uit de feed als het adres na doorverwijzen onthouden, anders komt het bericht terug.
   const markeer = (it) => { gezien[it.link] = nu; gezien[it.feedLink] = nu; };
@@ -551,7 +555,7 @@ async function verwerkGebruiker(naam, g, { nu, opgehaald, artikel, client, droog
   const dumpertRubriek = Object.keys(RUBRIEKEN).find((c) => BRONNEN.some((b) => b.soort === "dumpert" && b.rubrieken.includes(c)));
   for (const it of nieuw.filter((x) => x.bron.soort === "dumpert")) {
     markeer(it);
-    items.push({ ...(it.video ? { video: it.video } : {}), id: idVan(it.link), t: new Date(it.t).toISOString(), cat: it.bron.rubrieken[0] || dumpertRubriek, kop: it.titel, sam: it.beschrijving.slice(0, 220), links: [{ bron: "Dumpert", url: it.link }], score: 50, plek: it.plek, ...(it.beeld ? { beeld: it.beeld } : {}) });
+    items.push({ ...(it.video ? { video: it.video } : {}), id: idVan(it.link), ...plaatsing(it), cat: it.bron.rubrieken[0] || dumpertRubriek, kop: it.titel, sam: it.beschrijving.slice(0, 220), links: [{ bron: "Dumpert", url: it.link }], score: 50, plek: it.plek, ...(it.beeld ? { beeld: it.beeld } : {}) });
   }
 
   // Artikelen: betaalmuur, hoofdfoto en tekst (gedeelde cache)
@@ -628,7 +632,7 @@ async function verwerkGebruiker(naam, g, { nu, opgehaald, artikel, client, droog
       }
       const nieuwItem = {
         id: idVan(it.link),
-        t: new Date(it.t).toISOString(),
+        ...plaatsing(it),
         cat: rubriek,
         kop: String(o.kop).trim().slice(0, 140) || it.titel,
         sam: String(o.samenvatting).trim().slice(0, 300),
