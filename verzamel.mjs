@@ -388,13 +388,29 @@ async function beoordeel(client, systeem, batch) {
 }
 
 // ---------- Opslag ----------
+// Strato is af en toe even onbereikbaar ("fetch failed"): een paar keer opnieuw proberen.
+class Onbereikbaar extends Error {}
+async function naarServer(doel, url, opties) {
+  const pauzes = [5, 20, 45]; // seconden
+  for (let poging = 0; ; poging++) {
+    try {
+      return await fetch(url, { ...opties, signal: AbortSignal.timeout(opties.wacht) });
+    } catch (err) {
+      const reden = err.cause?.code || err.cause?.errors?.[0]?.code || err.cause?.message || err.name;
+      if (poging >= pauzes.length) throw new Onbereikbaar(`${doel}: server onbereikbaar na ${poging + 1} pogingen (${reden})`);
+      warn(`${doel}: server niet bereikbaar (${reden}); over ${pauzes[poging]} s opnieuw.`);
+      await new Promise((r) => setTimeout(r, pauzes[poging] * 1000));
+    }
+  }
+}
+
 async function laad(lokaal) {
   if (lokaal) {
     try { return JSON.parse(fs.readFileSync(lokaal, "utf8")); } catch { return {}; }
   }
-  const res = await fetch(`${process.env.NIEUWS_API}?a=export&v=2`, {
+  const res = await naarServer("export", `${process.env.NIEUWS_API}?a=export&v=2`, {
     headers: { "X-Nieuws-Token": process.env.NIEUWS_TOKEN, "User-Agent": UA },
-    signal: AbortSignal.timeout(30000),
+    wacht: 30000,
   });
   if (!res.ok) throw new Error(`export: HTTP ${res.status}`);
   return res.json();
@@ -405,11 +421,11 @@ async function bewaar(lokaal, data) {
     fs.writeFileSync(lokaal, JSON.stringify(data, null, 1));
     return;
   }
-  const res = await fetch(`${process.env.NIEUWS_API}?a=import`, {
+  const res = await naarServer("import", `${process.env.NIEUWS_API}?a=import`, {
     method: "POST",
     headers: { "X-Nieuws-Token": process.env.NIEUWS_TOKEN, "Content-Type": "application/json", "Content-Encoding": "gzip", "User-Agent": UA },
     body: zlib.gzipSync(JSON.stringify(data)),
-    signal: AbortSignal.timeout(60000),
+    wacht: 60000,
   });
   if (!res.ok) throw new Error(`import: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
 }
@@ -682,6 +698,11 @@ async function verwerkGebruiker(naam, g, { nu, opgehaald, artikel, client, droog
 }
 
 main().catch((err) => {
+  // Even onbereikbaar is geen fout: de volgende run haalt alles in (wat niet is opgeslagen, geldt nog als nieuw).
+  if (err instanceof Onbereikbaar) {
+    console.log(inCI ? `::warning::${err.message}; deze run overgeslagen.` : `WAARSCHUWING: ${err.message}; deze run overgeslagen.`);
+    process.exit(0);
+  }
   console.error(inCI ? `::error::${err.message}` : `FOUT: ${err.message}`);
   process.exit(1);
 });
