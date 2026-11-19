@@ -421,9 +421,10 @@ async function bewaar(lokaal, data) {
     fs.writeFileSync(lokaal, JSON.stringify(data, null, 1));
     return;
   }
+  // Geen application/json: sinds 19-11-2026 weigert Strato gzip met dat type al vóór PHP (HTTP 400).
   const res = await naarServer("import", `${process.env.NIEUWS_API}?a=import`, {
     method: "POST",
-    headers: { "X-Nieuws-Token": process.env.NIEUWS_TOKEN, "Content-Type": "application/json", "Content-Encoding": "gzip", "User-Agent": UA },
+    headers: { "X-Nieuws-Token": process.env.NIEUWS_TOKEN, "Content-Type": "application/octet-stream", "Content-Encoding": "gzip", "User-Agent": UA },
     body: zlib.gzipSync(JSON.stringify(data)),
     wacht: 60000,
   });
